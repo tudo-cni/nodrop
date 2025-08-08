@@ -1,0 +1,47 @@
+1092a1093,1099
+> 	if (unlikely(ptr_ring_full(&tfile->tx_ring))) {
+> 		queue = netdev_get_tx_queue(dev, txq);
+> 		netif_tx_stop_queue(queue);
+> 		rcu_read_unlock();
+> 		pr_warn("Full ring upon calling tun_net_xmit, should only happen very rarely");
+> 		return NETDEV_TX_BUSY;
+> 	}
+1132c1139,1141
+< 	if (ptr_ring_produce(&tfile->tx_ring, skb)) {
+---
+> 	queue = netdev_get_tx_queue(dev, txq);
+> 	if (unlikely(ptr_ring_produce(&tfile->tx_ring, skb))) {
+> 		netif_tx_stop_queue(queue);
+1133a1143
+> 		pr_warn("Full ring upon inserting, should never happen");
+1135a1146,1147
+> 	if (ptr_ring_full(&tfile->tx_ring))
+> 		netif_tx_stop_queue(queue);
+1138d1149
+< 	queue = netdev_get_tx_queue(dev, txq);
+2163c2174
+< static void *tun_ring_recv(struct tun_file *tfile, int noblock, int *err)
+---
+> static void *tun_ring_recv(struct tun_struct* tun, struct tun_file *tfile, int noblock, int *err)
+2165a2177
+> 	struct netdev_queue *txq;
+2171a2184,2188
+> 	txq = netdev_get_tx_queue(tun->dev, tfile->queue_index);
+> 	if (unlikely(netif_tx_queue_stopped(txq))) {
+> 		pr_warn("netif_tx_queue_stopped even though tun_ring is empty1");
+> 		netif_tx_wake_queue(txq);
+> 	}
+2183a2201,2204
+> 		if (unlikely(netif_tx_queue_stopped(txq))) {
+> 			pr_warn("netif_tx_queue_stopped even though tun_ring is empty2");
+> 			netif_tx_wake_queue(txq);
+> 		}
+2199a2221,2224
+> 	if (ptr_ring_empty(&tfile->tx_ring)) {
+> 		txq = netdev_get_tx_queue(tun->dev, tfile->queue_index);
+> 		netif_tx_wake_queue(txq);
+> 	}
+2218c2243
+< 		ptr = tun_ring_recv(tfile, noblock, &err);
+---
+> 		ptr = tun_ring_recv(tun, tfile, noblock, &err);
