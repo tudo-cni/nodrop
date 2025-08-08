@@ -13,7 +13,7 @@ If you use this code or results in your publications, please cite our work as me
 
 ## Detailed Changes
 
-Please visit [Visual NODROP Diff](https://cni.tu-dortmund.de) for a detailed side-by-side diff of the patch.
+Please visit [Visual NODROP Diff](https://cni.tu-dortmund.de) (coming soon.) for a detailed side-by-side diff of the patch.
 
 ## Usage
 
