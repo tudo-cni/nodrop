@@ -1,0 +1,197 @@
+From e0db0d71869a83f98f99566a581c9922988f0d8e Mon Sep 17 00:00:00 2001
+From: Simon Schippers <simon.schippers@tu-dortmund.de>
+Date: Mon, 1 Sep 2025 23:00:41 +0200
+Subject: [PATCH 4/4] netdev queue flow control for vhost_net
+
+Stopping the queue is done in tun_net_xmit.
+
+Waking the queue is done by calling one of the helpers,
+tun_wake_netdev_queue and tap_wake_netdev_queue. For that, in
+get_wake_netdev_queue, the correct method is determined and saved in the
+function pointer wake_netdev_queue of the vhost_net_virtqueue. Then, each
+time after consuming a batch in vhost_net_buf_produce, wake_netdev_queue
+is called.
+
+Co-developed-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ drivers/net/tap.c      |  6 ++++++
+ drivers/net/tun.c      |  6 ++++++
+ drivers/vhost/net.c    | 34 ++++++++++++++++++++++++++++------
+ include/linux/if_tap.h |  2 ++
+ include/linux/if_tun.h |  3 +++
+ 5 files changed, 45 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/tap.c b/drivers/net/tap.c
+index 4d874672bcd7..0bad9e3d59af 100644
+--- a/drivers/net/tap.c
++++ b/drivers/net/tap.c
+@@ -1198,6 +1198,12 @@ struct socket *tap_get_socket(struct file *file)
+ }
+ EXPORT_SYMBOL_GPL(tap_get_socket);
+ 
++void tap_wake_netdev_queue(struct file *file)
++{
++	wake_netdev_queue(file->private_data);
++}
++EXPORT_SYMBOL_GPL(tap_wake_netdev_queue);
++
+ struct ptr_ring *tap_get_ptr_ring(struct file *file)
+ {
+ 	struct tap_queue *q;
+diff --git a/drivers/net/tun.c b/drivers/net/tun.c
+index 735498e221d8..e85589b596ac 100644
+--- a/drivers/net/tun.c
++++ b/drivers/net/tun.c
+@@ -3739,6 +3739,12 @@ struct socket *tun_get_socket(struct file *file)
+ }
+ EXPORT_SYMBOL_GPL(tun_get_socket);
+ 
++void tun_wake_netdev_queue(struct file *file)
++{
++	wake_netdev_queue(file->private_data);
++}
++EXPORT_SYMBOL_GPL(tun_wake_netdev_queue);
++
+ struct ptr_ring *tun_get_tx_ring(struct file *file)
+ {
+ 	struct tun_file *tfile;
+diff --git a/drivers/vhost/net.c b/drivers/vhost/net.c
+index 6edac0c1ba9b..e837d3a334f1 100644
+--- a/drivers/vhost/net.c
++++ b/drivers/vhost/net.c
+@@ -130,6 +130,7 @@ struct vhost_net_virtqueue {
+ 	struct vhost_net_buf rxq;
+ 	/* Batched XDP buffs */
+ 	struct xdp_buff *xdp;
++	void (*wake_netdev_queue)(struct file *f);
+ };
+ 
+ struct vhost_net {
+@@ -175,13 +176,16 @@ static void *vhost_net_buf_consume(struct vhost_net_buf *rxq)
+ 	return ret;
+ }
+ 
+-static int vhost_net_buf_produce(struct vhost_net_virtqueue *nvq)
++static int vhost_net_buf_produce(struct vhost_net_virtqueue *nvq,
++								 struct sock *sk)
+ {
++	struct file *file = sk->sk_socket->file;
+ 	struct vhost_net_buf *rxq = &nvq->rxq;
+ 
+ 	rxq->head = 0;
+ 	rxq->tail = ptr_ring_consume_batched(nvq->rx_ring, rxq->queue,
+ 					      VHOST_NET_BATCH);
++	nvq->wake_netdev_queue(file);
+ 	return rxq->tail;
+ }
+ 
+@@ -208,14 +212,15 @@ static int vhost_net_buf_peek_len(void *ptr)
+ 	return __skb_array_len_with_tag(ptr);
+ }
+ 
+-static int vhost_net_buf_peek(struct vhost_net_virtqueue *nvq)
++static int vhost_net_buf_peek(struct vhost_net_virtqueue *nvq,
++							  struct sock *sk)
+ {
+ 	struct vhost_net_buf *rxq = &nvq->rxq;
+ 
+ 	if (!vhost_net_buf_is_empty(rxq))
+ 		goto out;
+ 
+-	if (!vhost_net_buf_produce(nvq))
++	if (!vhost_net_buf_produce(nvq, sk))
+ 		return 0;
+ 
+ out:
+@@ -994,7 +999,7 @@ static int peek_head_len(struct vhost_net_virtqueue *rvq, struct sock *sk)
+ 	unsigned long flags;
+ 
+ 	if (rvq->rx_ring)
+-		return vhost_net_buf_peek(rvq);
++		return vhost_net_buf_peek(rvq, sk);
+ 
+ 	spin_lock_irqsave(&sk->sk_receive_queue.lock, flags);
+ 	head = skb_peek(&sk->sk_receive_queue);
+@@ -1499,6 +1504,19 @@ static struct socket *get_tap_socket(int fd)
+ 	return sock;
+ }
+ 
++static void (*get_wake_netdev_queue(struct file *file))(struct file *file)
++{
++	struct ptr_ring *ring;
++
++	ring = tun_get_tx_ring(file);
++	if (!IS_ERR(ring))
++		return tun_wake_netdev_queue;
++	ring = tap_get_ptr_ring(file);
++	if (!IS_ERR(ring))
++		return tap_wake_netdev_queue;
++	return NULL;
++}
++
+ static struct socket *get_socket(int fd)
+ {
+ 	struct socket *sock;
+@@ -1570,10 +1588,14 @@ static long vhost_net_set_backend(struct vhost_net *n, unsigned index, int fd)
+ 		if (r)
+ 			goto err_used;
+ 		if (index == VHOST_NET_VQ_RX) {
+-			if (sock)
++			if (sock) {
+ 				nvq->rx_ring = get_tap_ptr_ring(sock->file);
+-			else
++				nvq->wake_netdev_queue =
++					get_wake_netdev_queue(sock->file);
++			} else {
+ 				nvq->rx_ring = NULL;
++				nvq->wake_netdev_queue = NULL;
++			}
+ 		}
+ 
+ 		oldubufs = nvq->ubufs;
+diff --git a/include/linux/if_tap.h b/include/linux/if_tap.h
+index 553552fa635c..02b2809784b5 100644
+--- a/include/linux/if_tap.h
++++ b/include/linux/if_tap.h
+@@ -10,6 +10,7 @@ struct socket;
+ 
+ #if IS_ENABLED(CONFIG_TAP)
+ struct socket *tap_get_socket(struct file *);
++void tap_wake_netdev_queue(struct file *file);
+ struct ptr_ring *tap_get_ptr_ring(struct file *file);
+ #else
+ #include <linux/err.h>
+@@ -18,6 +19,7 @@ static inline struct socket *tap_get_socket(struct file *f)
+ {
+ 	return ERR_PTR(-EINVAL);
+ }
++static inline void tap_wake_netdev_queue(struct file *f) {}
+ static inline struct ptr_ring *tap_get_ptr_ring(struct file *f)
+ {
+ 	return ERR_PTR(-EINVAL);
+diff --git a/include/linux/if_tun.h b/include/linux/if_tun.h
+index 80166eb62f41..04c504bb1954 100644
+--- a/include/linux/if_tun.h
++++ b/include/linux/if_tun.h
+@@ -21,6 +21,7 @@ struct tun_msg_ctl {
+ 
+ #if defined(CONFIG_TUN) || defined(CONFIG_TUN_MODULE)
+ struct socket *tun_get_socket(struct file *);
++void tun_wake_netdev_queue(struct file *file);
+ struct ptr_ring *tun_get_tx_ring(struct file *file);
+ 
+ static inline bool tun_is_xdp_frame(void *ptr)
+@@ -50,6 +51,8 @@ static inline struct socket *tun_get_socket(struct file *f)
+ 	return ERR_PTR(-EINVAL);
+ }
+ 
++static inline void tun_wake_netdev_queue(struct file *f) {}
++
+ static inline struct ptr_ring *tun_get_tx_ring(struct file *f)
+ {
+ 	return ERR_PTR(-EINVAL);
+-- 
+2.43.0
+

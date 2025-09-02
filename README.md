@@ -15,15 +15,17 @@ If you use this code or results in your publications, please cite our work as me
 
 Please visit [Visual NODROP Diff](https://cni.tu-dortmund.de) (coming soon.) for a detailed side-by-side diff of the patch.
 
+
 ## Usage
 
-Currently the patch has to be applied manually to your distributions kernel-tree. Please use the `nodrop.patch` file together with `patch` or `git patch` to apply the changes.
+Currently the patch has to be applied manually to your distributions kernel-tree. Please use git to apply the patch series.
 
-## Validation Tools
+## TUN Validation Tools
 
 Our proposed validation tools can be used to verify the packet drop behavior of the default TUN driver for single and multi queue TUN interfaces.
 
-With the NODROP patch the tools should show zero packet drops.
+With the NODROP patch the tool should show zero packet drops.
+ 
 
 <details>
   <summary>Compile the validation tools</summary>
@@ -46,13 +48,13 @@ sudo sh if_up_single_queue.sh
 Run the TUN client:
 
 ```
-Usage: ./tun_single_queue.o wait_time_nanos run_time_ns
+Usage: ./tun_single_queue.o backpressure_flag wait_time_nanos report_interval
 ```
 
-Example usage:
+Typical usage: Backpressure enabled, limited speed due to wait_time_nanos and report not too often:
 
 ```
-sudo ./tun_single_queue.o 10000 5000000000
+sudo ./tun_single_queue.o 1 100000 10000
 ```
 
 Optional: Set the TUN queue size:
@@ -128,6 +130,10 @@ Here we only have 4 targets and want sending as fast as possible:
 ```
 
 </details>
+
+## TAP Validation
+
+Description coming soon. Benchmarks for theoretical tests and for VM setup with TAP or TAP+vhost_net are in the respective directories already.
 
 ## Acknowledgements
 

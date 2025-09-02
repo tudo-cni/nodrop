@@ -1,0 +1,73 @@
+From e71c845f390b7263a21307484ec1dc2afcc92246 Mon Sep 17 00:00:00 2001
+From: Simon Schippers <simon.schippers@tu-dortmund.de>
+Date: Mon, 1 Sep 2025 22:54:06 +0200
+Subject: [PATCH 3/4] netdev queue flow control for TAP
+
+Stopping the netdev queue is done in tun_net_xmit, as TAP uses this method
+as its ndo_start_xmit.
+
+To wake the queue, the new helper wake_netdev_queue is called in
+tap_do_read. This is done in the blocking wait queue and after consuming
+an SKB from the ptr_ring. This helper first checks if the netdev queue has
+stopped. Then with the smp_rmb(), which is paired with the smp_wmb() of
+tun_net_xmit, it is known that tun_net_xmit will not produce SKBs anymore.
+With that knowledge, the helper can then wake the netdev queue if there is
+at least a single spare slot. This check is done by calling the method
+ptr_ring_spare.
+
+Co-developed-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ drivers/net/tap.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/drivers/net/tap.c b/drivers/net/tap.c
+index 1197f245e873..4d874672bcd7 100644
+--- a/drivers/net/tap.c
++++ b/drivers/net/tap.c
+@@ -753,6 +753,24 @@ static ssize_t tap_put_user(struct tap_queue *q,
+ 	return ret ? ret : total;
+ }
+ 
++static inline void wake_netdev_queue(struct tap_queue *q)
++{
++	struct netdev_queue *txq;
++	struct net_device *dev;
++
++	rcu_read_lock();
++	dev = rcu_dereference(q->tap)->dev;
++	txq = netdev_get_tx_queue(dev, q->queue_index);
++
++	if (netif_tx_queue_stopped(txq)) {
++		/* Paired with smp_wmb() in tun_net_xmit. */
++		smp_rmb();
++		if (ptr_ring_spare(&q->ring, 1))
++			netif_tx_wake_queue(txq);
++	}
++	rcu_read_unlock();
++}
++
+ static ssize_t tap_do_read(struct tap_queue *q,
+ 			   struct iov_iter *to,
+ 			   int noblock, struct sk_buff *skb)
+@@ -785,12 +803,16 @@ static ssize_t tap_do_read(struct tap_queue *q,
+ 			ret = -ERESTARTSYS;
+ 			break;
+ 		}
++		wake_netdev_queue(q);
++
+ 		/* Nothing to read, let's sleep */
+ 		schedule();
+ 	}
+ 	if (!noblock)
+ 		finish_wait(sk_sleep(&q->sk), &wait);
+ 
++	wake_netdev_queue(q);
++
+ put:
+ 	if (skb) {
+ 		ret = tap_put_user(q, skb, to);
+-- 
+2.43.0
+

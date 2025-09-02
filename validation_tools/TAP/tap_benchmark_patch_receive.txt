@@ -1,0 +1,6 @@
+wait_time_nanos: 0
+run_time_ns: 300000000000
+RECEIVED_PACKET_SIZE: 1450
+Trying to open tap0...
+Device tap0 opened
+packets_received: 126873119 | packets_lost: 0 | Speed [Byte/s]: 613220072.507336

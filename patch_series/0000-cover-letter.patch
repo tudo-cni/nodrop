@@ -1,0 +1,86 @@
+From e0db0d71869a83f98f99566a581c9922988f0d8e Mon Sep 17 00:00:00 2001
+From: Simon Schippers <simon.schippers@tu-dortmund.de>
+Date: Tue, 2 Sep 2025 09:32:30 +0200
+Subject: [PATCH net-next v4 0/4] TUN/TAP & vhost_net: netdev queue flow control to avoid ptr_ring tail drop
+
+This patch series deals with TUN/TAP and vhost_net which drop incoming 
+SKB's whenever their internal ptr_ring buffer is full. Instead, with this 
+patch series, the associated netdev queue is stopped before this happens. 
+This allows the connected qdisc to function correctly as reported by [1] 
+and improves application-layer performance, see benchmarks.
+
+This patch series includes TUN, TAP, and vhost_net because they share 
+logic. Adjusting only one of them would break the others. Therefore, the 
+patch series is structured as follows:
+1. New ptr_ring_spare helper to check if the ptr_ring has spare capacity
+2. Netdev queue flow control for TUN: Logic for stopping the queue upon 
+full ptr_ring and waking the queue if ptr_ring has spare capacity
+3. Additions for TAP: Similar logic for waking the queue
+4. Additions for vhost_net: Calling TUN/TAP methods for waking the queue
+
+Benchmarks ([2] & [3]):
+- TUN: TCP throughput over real-world 120ms RTT OpenVPN connection 
+improved by 36% (117Mbit/s vs 185 Mbit/s)
+- TAP: TCP throughput to local qemu VM stays the same (2.2Gbit/s), an 
+improvement by factor 2 at emulated 120ms RTT (98Mbit/s vs 198Mbit/s)
+- TAP+vhost_net: TCP throughput to local qemu VM approx. the same 
+(23.4Gbit/s vs 23.9Gbit/s), same performance at emulated 120ms RTT 
+(200Mbit/s)
+- TUN/TAP/TAP+vhost_net: Reduction of ptr_ring size to ~10 packets 
+possible without losing performance
+
+Possible future work:
+- Introduction of Byte Queue Limits as suggested by Stephen Hemminger
+- Adaption of the netdev queue flow control for ipvtap & macvtap
+
+[1] Link: 
+https://unix.stackexchange.com/questions/762935/traffic-shaping-ineffective-on-tun-device
+[2] Link: 
+https://cni.etit.tu-dortmund.de/storages/cni-etit/r/Research/Publications/2025/Gebauer_2025_VTCFall/Gebauer_VTCFall2025_AuthorsVersion.pdf
+[3] Link: https://github.com/tudo-cni/nodrop
+
+Links to previous versions:
+V3: 
+https://lore.kernel.org/netdev/20250825211832.84901-1-simon.schippers@tu-dortmund.de/T/#u
+V2: 
+https://lore.kernel.org/netdev/20250811220430.14063-1-simon.schippers@tu-dortmund.de/T/#u
+V1: 
+https://lore.kernel.org/netdev/20250808153721.261334-1-simon.schippers@tu-dortmund.de/T/#u
+
+Changelog:
+V3 -> V4:
+- Target net-next instead of net
+- Changed to patch series instead of single patch
+- Changed to new title from old title
+"TUN/TAP: Improving throughput and latency by avoiding SKB drops"
+- Wake netdev queue with new helpers wake_netdev_queue when there is any 
+spare capacity in the ptr_ring instead of waiting for it to be empty
+- Use tun_file instead of tun_struct in tun_ring_recv as a more consistent 
+logic
+- Use smp_wmb() and smp_rmb() barrier pair, which avoids any packet drops 
+that happened rarely before
+- Use safer logic for vhost_net using RCU read locks to access TUN/TAP data
+
+V2 -> V3: Added support for TAP and TAP+vhost_net.
+
+V1 -> V2: Removed NETDEV_TX_BUSY return case in tun_net_xmit and removed 
+unnecessary netif_tx_wake_queue in tun_ring_recv.
+
+Simon Schippers (4):
+  ptr_ring_spare: Helper to check if spare capacity of size cnt is
+    available
+  netdev queue flow control for TUN
+  netdev queue flow control for TAP
+  netdev queue flow control for vhost_net
+
+ drivers/net/tap.c        | 28 ++++++++++++++++
+ drivers/net/tun.c        | 39 ++++++++++++++++++++--
+ drivers/vhost/net.c      | 34 +++++++++++++++----
+ include/linux/if_tap.h   |  2 ++
+ include/linux/if_tun.h   |  3 ++
+ include/linux/ptr_ring.h | 71 ++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 168 insertions(+), 9 deletions(-)
+
+-- 
+2.43.0
+
